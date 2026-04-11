@@ -23,7 +23,7 @@ app.add_middleware(
 # ===============================
 # MODEL
 # ===============================
-model = load_model("vgg16_custom_model.keras", compile=False)
+model = load_model("fixed_model.keras", compile=False)
 IMG_SIZE = (224, 224)
 
 face_cascade = cv2.CascadeClassifier(
