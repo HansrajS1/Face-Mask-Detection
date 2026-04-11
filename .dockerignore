@@ -1,0 +1,12 @@
+venv
+venv/
+.venv/
+model/
+Dataset.zip
+env/
+__pycache__/
+*.pyc
+test.html
+model.tflite
+Dataset/
+Dataset.zip
