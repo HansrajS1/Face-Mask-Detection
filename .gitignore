@@ -12,3 +12,4 @@ vgg16_custom_model.h5
 *.h5
 Dataset/
 fixed_model.keras
+*.keras
