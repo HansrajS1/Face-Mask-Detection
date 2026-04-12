@@ -1,1 +1,1 @@
-vgg16_custom_model.h5 filter=lfs diff=lfs merge=lfs -text
+vgg16_custom_model.keras filter=lfs diff=lfs merge=lfs -text
