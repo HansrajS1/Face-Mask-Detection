@@ -2,16 +2,19 @@ import cv2
 import numpy as np
 import asyncio
 import threading
+import time
+import tensorflow as tf
+
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 from tensorflow.keras.models import load_model
 
+# ===============================
+# APP INIT
+# ===============================
 app = FastAPI()
 
-# ===============================
-# CORS (RENDER SAFE)
-# ===============================
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -21,11 +24,15 @@ app.add_middleware(
 )
 
 # ===============================
-# MODEL
+# LOAD MODEL
 # ===============================
-model = load_model("fixed_model.keras", compile=False)
+model = load_model("vgg16_custom_model.keras", compile=False)
+
 IMG_SIZE = (224, 224)
 
+# ===============================
+# FACE DETECTOR
+# ===============================
 face_cascade = cv2.CascadeClassifier(
     cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
 )
@@ -33,20 +40,40 @@ face_cascade = cv2.CascadeClassifier(
 cv2.setNumThreads(1)
 
 # ===============================
-# GLOBAL FRAME (NO CAMERA ON SERVER)
+# GLOBAL STATE
 # ===============================
 latest_frame = None
 latest_result = []
 lock = threading.Lock()
 
 # ===============================
-# AI PROCESSOR THREAD
+# 🔥 FIXED PREDICTION FUNCTION
+# ===============================
+def predict_face(face_img):
+    face = cv2.resize(face_img, IMG_SIZE)
+    face = face.astype("float32") / 255.0
+    face = np.expand_dims(face, axis=0)
+
+    pred = model.predict(face, verbose=0)[0]
+
+    # EXPECTED: [mask, no_mask]
+    mask_prob = pred[0]
+    no_mask_prob = pred[1]
+
+    if mask_prob > no_mask_prob:
+        return "With Mask", (0, 255, 0)
+    else:
+        return "Without Mask", (0, 0, 255)
+
+# ===============================
+# BACKGROUND THREAD
 # ===============================
 def process_frames():
     global latest_frame, latest_result
 
     while True:
         if latest_frame is None:
+            time.sleep(0.01)
             continue
 
         with lock:
@@ -58,20 +85,13 @@ def process_frames():
         results = []
 
         for (x, y, w, h) in faces:
-            face = frame[y:y+h, x:x+w]
+            x, y = max(0, x), max(0, y)
 
+            face = frame[y:y+h, x:x+w]
             if face.size == 0:
                 continue
 
-            face = cv2.resize(face, IMG_SIZE)
-            face = face.astype("float32") / 255.0
-            face = np.expand_dims(face, axis=0)
-
-            pred = model.predict(face, verbose=0)[0]
-            score = float(pred[0])
-
-            label = "With Mask" if score <= 0.4 else "Without Mask"
-            color = (0, 255, 0) if label == "With Mask" else (0, 0, 255)
+            label, color = predict_face(face)
 
             results.append((x, y, w, h, label, color))
 
@@ -81,14 +101,13 @@ def process_frames():
 threading.Thread(target=process_frames, daemon=True).start()
 
 # ===============================
-# WEBSOCKET (LIVE STREAM)
+# WEBSOCKET STREAM
 # ===============================
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     global latest_frame, latest_result
 
     await websocket.accept()
-    print("Client connected")
 
     try:
         while True:
@@ -112,27 +131,26 @@ async def websocket_endpoint(websocket: WebSocket):
 
             for (x, y, w, h, label, color) in results:
                 cv2.rectangle(output, (x, y), (x+w, y+h), color, 2)
-                cv2.putText(output, label, (x, y-10),
+                cv2.putText(output, label, (x, y - 10),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
             _, buffer = cv2.imencode(".jpg", output)
 
             await websocket.send_bytes(buffer.tobytes())
-
             await asyncio.sleep(0.03)
 
     except WebSocketDisconnect:
         print("Client disconnected")
 
 # ===============================
-# 📸 SNAPSHOT (NO CAMERA)
+# SNAPSHOT
 # ===============================
 @app.get("/snapshot")
 def snapshot():
     global latest_frame
 
     if latest_frame is None:
-        return {"error": "No frame received yet from WebSocket"}
+        return {"error": "No frame received yet"}
 
     with lock:
         frame = latest_frame.copy()
@@ -140,7 +158,7 @@ def snapshot():
 
     for (x, y, w, h, label, color) in results:
         cv2.rectangle(frame, (x, y), (x+w, y+h), color, 2)
-        cv2.putText(frame, label, (x, y-10),
+        cv2.putText(frame, label, (x, y - 10),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
     _, buffer = cv2.imencode(".jpg", frame)
@@ -148,7 +166,7 @@ def snapshot():
     return StreamingResponse(iter([buffer.tobytes()]), media_type="image/jpeg")
 
 # ===============================
-# 📸 IMAGE UPLOAD
+# IMAGE UPLOAD
 # ===============================
 @app.post("/upload-image")
 async def upload_image(file: UploadFile = File(...)):
@@ -166,19 +184,13 @@ async def upload_image(file: UploadFile = File(...)):
 
     for (x, y, w, h) in faces:
         face = img[y:y+h, x:x+w]
+        if face.size == 0:
+            continue
 
-        face = cv2.resize(face, IMG_SIZE)
-        face = face.astype("float32") / 255.0
-        face = np.expand_dims(face, axis=0)
-
-        pred = model.predict(face, verbose=0)[0]
-        score = float(pred[0])
-
-        label = "With Mask" if score <= 0.4 else "Without Mask"
-        color = (0, 255, 0) if label == "With Mask" else (0, 0, 255)
+        label, color = predict_face(face)
 
         cv2.rectangle(img, (x, y), (x+w, y+h), color, 2)
-        cv2.putText(img, label, (x, y-10),
+        cv2.putText(img, label, (x, y - 10),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
     _, buffer = cv2.imencode(".jpg", img)
@@ -186,7 +198,7 @@ async def upload_image(file: UploadFile = File(...)):
     return StreamingResponse(iter([buffer.tobytes()]), media_type="image/jpeg")
 
 # ===============================
-# 🎬 VIDEO UPLOAD
+# VIDEO UPLOAD
 # ===============================
 @app.post("/upload-video")
 async def upload_video(file: UploadFile = File(...)):
@@ -211,19 +223,13 @@ async def upload_video(file: UploadFile = File(...)):
 
             for (x, y, w, h) in faces:
                 face = frame[y:y+h, x:x+w]
+                if face.size == 0:
+                    continue
 
-                face = cv2.resize(face, IMG_SIZE)
-                face = face.astype("float32") / 255.0
-                face = np.expand_dims(face, axis=0)
-
-                pred = model.predict(face, verbose=0)[0]
-                score = float(pred[0])
-
-                label = "With Mask" if score <= 0.4 else "Without Mask"
-                color = (0, 255, 0) if label == "With Mask" else (0, 0, 255)
+                label, color = predict_face(face)
 
                 cv2.rectangle(frame, (x, y), (x+w, y+h), color, 2)
-                cv2.putText(frame, label, (x, y-10),
+                cv2.putText(frame, label, (x, y - 10),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
             _, buffer = cv2.imencode(".jpg", frame)
@@ -232,10 +238,8 @@ async def upload_video(file: UploadFile = File(...)):
                    b'Content-Type: image/jpeg\r\n\r\n' +
                    buffer.tobytes() + b'\r\n')
 
-    return StreamingResponse(
-        generate(),
-        media_type="multipart/x-mixed-replace; boundary=frame"
-    )
+    return StreamingResponse(generate(),
+        media_type="multipart/x-mixed-replace; boundary=frame")
 
 # ===============================
 # HOME
@@ -243,8 +247,8 @@ async def upload_video(file: UploadFile = File(...)):
 @app.get("/")
 def home():
     return {
-        "status": "RUNNING ON RENDER",
-        "message": "Face Mask Detection API",
+        "status": "RUNNING",
+        "message": "Face Mask Detection API FIXED",
         "endpoints": {
             "ws": "/ws",
             "snapshot": "/snapshot",

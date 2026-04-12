@@ -7,3 +7,5 @@ env/
 __pycache__/
 *.pyc
 test.html
+env2/
+vgg16_custom_model.h5
